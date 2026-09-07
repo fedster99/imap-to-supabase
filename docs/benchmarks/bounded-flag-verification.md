@@ -1,5 +1,52 @@
 # Bounded flag verification experiment
 
+## Integrated candidate
+
+The candidate now persists progress on the existing folder row and resumes
+bounded flag turns through the existing worker loop. It replaces the routine
+no-MODSEQ seven-day approximation with full-live-window coverage. No separate
+queue, pool, service, timer, or resource increase is introduced in public core.
+Explicit live flag proofs and CONDSTORE/QRESYNC remain immediate; live metadata
+alone cannot mark a background sweep complete. No merge or deployment occurred.
+
+Regression tests cover restart, a new arrival during a sweep, a live pass during
+partial progress, account/UIDVALIDITY fencing, folder fairness, missing provider
+UIDs, and a real rejected checkpoint write after flags committed. The last case
+replays idempotently after the existing account backoff. Missing UIDs go through
+normal reconciliation rather than a guessed cursor or a tight retry loop.
+
+`--engine` runs the actual engine, account lock, repository and durable cursor
+against disposable Postgres. It rebuilds the engine between turns. IMAP remains
+simulated, and no mixed user/body/search workload or CPU/memory cap applies.
+
+| Rows | Phase | Exact | Turns | Total | Turn p95 | Turn p99 | Worst |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | Changed | 1,000 | 20 | 1.057 s | 89.4 ms | 89.6 ms | 89.6 ms |
+| 1,000 | Unchanged | 1,000 | 20 | 0.642 s | 40.1 ms | 50.0 ms | 50.0 ms |
+| 10,000 | Changed | 10,000 | 200 | 9.649 s | 63.6 ms | 82.6 ms | 115.7 ms |
+| 10,000 | Unchanged | 10,000 | 200 | 6.219 s | 43.0 ms | 51.2 ms | 59.5 ms |
+
+Two physical pool clients; zero sampled waiters, wrong-scope updates or replay
+changes. These turn durations are not mailbox-convergence or real IMAP timings.
+The earlier page-only DB probe was cheaper (about 4.0/1.3 s for 10,000 changed/
+unchanged rows), because it omitted durable checkpoints and per-turn account
+ownership. This is a correctness/fairness improvement, **not a demonstrated
+total-throughput gain**. Connection setup, provider throttling, concurrent load,
+and sparse historical distributions remain required qualification measurements.
+
+```bash
+pnpm --filter @supamail/api exec tsx scripts/benchmark-flag-verification.ts --engine
+pnpm test:db:live
+```
+
+Integrated verification: 914 default API tests passed (264 DB-gated tests
+skipped there); all 264 live-DB tests and 120 spec-conformance assertions
+passed separately, including migration reapplication. Root typecheck/build
+passed; unchanged web results used the workspace cache. No real-provider or
+mixed-load capacity claim follows from these focused tests.
+
+## Original test-only experiment (`0beba0b3`)
+
 Status: retain the page primitive as an experiment; reject one-page-per-safety-cycle scheduling.
 No production scan policy, scheduler, schema, queue, timeout, or limit changed.
 The prototype is under test helpers and is not imported by runtime code.

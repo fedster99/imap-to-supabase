@@ -8,7 +8,7 @@ import { MirrorEngine } from "../src/sync-engine.js";
 import type { MirrorImapClient } from "../src/imap-client.js";
 import { MirrorRepository } from "../src/repository.js";
 import { applyPublicMigrations, type PgPool } from "../src/db.js";
-import type { ImapFolder, MessageFlagSnapshot } from "../src/types.js";
+import type { ImapFolder, MessageFlagSnapshot, SyncResult } from "../src/types.js";
 import { EphemeralPostgres, installEphemeralPostgresSignalHandlers } from "./ephemeral-postgres.js";
 import { verifyFlagPage, type FlagCheckpoint } from "../src/__tests__/helpers/flag-verification-prototype.js";
 
@@ -17,7 +17,7 @@ const config = getConfig({
   IMAP_ENCRYPTION_KEY: "unused-fixture-key",
 });
 const batchSize = config.INCREMENTAL_SYNC_BATCH_SIZE;
-if (process.argv.includes("--db")) {
+if (process.argv.includes("--db") || process.argv.includes("--engine")) {
   await runDatabaseProbe();
   process.exit(0);
 }
@@ -146,6 +146,7 @@ for (const size of sizes) {
 }
 
 async function runDatabaseProbe() {
+  const integrated = process.argv.includes("--engine");
   const database = new EphemeralPostgres({
     image: "postgres:16-alpine", namePrefix: "supamail-flag-page", purpose: "flag-page-experiment",
   });
@@ -203,12 +204,43 @@ async function runDatabaseProbe() {
         accountId: account.id, folderPath: "Archive", uidValidity: 4, afterUid: 0, throughUid: size,
       };
       const client = {
+        mailbox: { path: "Archive", uidValidity: 4n, uidNext: size + 1, exists: size },
+        async getMailboxLock() { return { release() {} }; },
+        async logout() {},
         async *fetch(uids: number[]) {
           for (const uid of uids) yield { uid, flags: new Set(["\\Seen", "\\Flagged"]) };
         },
       } as unknown as MirrorImapClient;
+      if (integrated) {
+        await pool.query("UPDATE public.imap_accounts SET sync_state='HEALTHY' WHERE id=$1", [account.id]);
+        await pool.query(`UPDATE public.imap_folders SET last_uid=$2, status='ACTIVE',
+          next_reconcile_at=now()+interval '1 day', next_flag_scan_at=now(),
+          flag_scan_after_uid=NULL, flag_scan_through_uid=NULL WHERE id=$1`, [folder.id, size]);
+        await repository.beginFlagScan(account.id, folder, 4, size,
+          { deadlineAt: Date.now() + config.FLAG_SCAN_TOTAL_TIMEOUT_MS });
+      }
       const started = performance.now();
+      const cpuStart = process.cpuUsage();
+      let peakRss = process.memoryUsage().rss;
+      const turns: number[] = [];
       while (true) {
+        if (integrated) {
+          const t = performance.now();
+          // Reconstruct the engine each turn: only the database keeps progress.
+          const engine: MirrorEngine = new MirrorEngine({ pool, repository, config,
+            clientFactory: async () => client });
+          const result: SyncResult = await engine.syncAccount(account.id, "scheduled", { flagVerificationOnly: true });
+          assert.equal(result.errors.length, 0, JSON.stringify(result));
+          checked += result.flagRowsChecked ?? 0;
+          assert.ok((result.flagRowsChecked ?? 0) > 0, "integrated sweep stopped making progress");
+          changed += result.flagsUpdated;
+          turns.push(performance.now() - t);
+          peakClients = Math.max(peakClients, pool.totalCount);
+          maxWaiters = Math.max(maxWaiters, pool.waitingCount);
+          peakRss = Math.max(peakRss, process.memoryUsage().rss);
+          if ((await repository.getFlagScanContinuations(account.id)).length === 0) break;
+          continue;
+        }
         const result = await verifyFlagPage({
           checkpoint, currentScope: { accountId: account.id, folderPath: "Archive", uidValidity: 4 },
           batchSize, client,
@@ -253,17 +285,21 @@ async function runDatabaseProbe() {
         Array.from({ length: batchSize }, (_, i) => ({ uid: i + 1, flags: ["\\Seen", "\\Flagged"] })));
       assert.equal(replay.flagsChanged, 0);
       const stats = (values: number[]) => {
+        if (values.length === 0) return null;
         const sorted = [...values].sort((a, b) => a - b);
         const p = (q: number) => Number(sorted[Math.max(0, Math.ceil(sorted.length * q) - 1)].toFixed(3));
         return { count: values.length, totalMs: Math.round(values.reduce((a,b) => a+b, 0)),
           p50Ms: p(.5), p95Ms: p(.95), p99Ms: p(.99), worstMs: p(1) };
       };
-      console.log(JSON.stringify({ kind: "database-result", size, phase: expectedChanges ? "changed" : "unchanged",
+      console.log(JSON.stringify({ kind: integrated ? "engine-result" : "database-result", size, phase: expectedChanges ? "changed" : "unchanged",
         checked, exact, changed, wrongScopeUpdates: wrong,
         replayChanges: replay.flagsChanged, wallMs: Math.round(wallMs), reads: stats(readTimes),
         writes: stats(writeTimes), peakClients, sampledMaxWaiters: maxWaiters,
+        turns: stats(turns), cpu: process.cpuUsage(cpuStart), peakRss,
         queryPlan: plan.rows[0]["QUERY PLAN"],
-        note: "real local Postgres and repository; simulated IMAP, no worker/MCP/search/body workload or durable checkpoint",
+        note: integrated
+          ? "real local Postgres, engine, locks and durable cursor; simulated IMAP, no mixed worker/MCP/search/body load or resource limit"
+          : "real local Postgres and repository; simulated IMAP, no worker/MCP/search/body workload or durable checkpoint",
       }));
       }
     }
