@@ -49,8 +49,8 @@ importers:
         specifier: ^3.9.14
         version: 3.9.14
       nodemailer:
-        specifier: ^9.0.3
-        version: 9.0.3
+        specifier: ^9.1.1
+        version: 9.1.1
       pg:
         specifier: ^8.13.1
         version: 8.20.0
@@ -1118,6 +1118,10 @@ packages:
 
   nodemailer@9.0.3:
     resolution: {integrity: sha512-n+YP+NKwR5zRWa60k3GiQ6Q3B4KXCoAw40dAKeCtYn020iNN74aWK2liXIC3ZEATeGql7we3tE3t8QwhY0eskw==}
+    engines: {node: '>=6.0.0'}
+
+  nodemailer@9.1.1:
+    resolution: {integrity: sha512-izw9mVKFix6YSnC9eLgV6g1opl9DUlRio9ZNcq+Wu9Ujn2UwF+8Nl0B8nz22kEC+CTZCvinkxwJ0DeFbb6NwcQ==}
     engines: {node: '>=6.0.0'}
 
   object-assign@4.1.1:
@@ -2439,6 +2443,8 @@ snapshots:
       - babel-plugin-macros
 
   nodemailer@9.0.3: {}
+
+  nodemailer@9.1.1: {}
 
   object-assign@4.1.1: {}
 
